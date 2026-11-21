@@ -14,7 +14,7 @@ for arch in x86_64 arm64; do
     swiftc -O \
         -target "$arch-apple-macos$MIN_OS" \
         -o "build/Clampless-$arch" \
-        Sources/main.swift
+        Sources/*.swift
 done
 
 echo "==> Universal 바이너리 생성"

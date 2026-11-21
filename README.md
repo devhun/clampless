@@ -56,6 +56,17 @@ cp -R build/Clampless.app /Applications/
 open /Applications/Clampless.app
 ```
 
+## 자동 업데이트
+
+시작 15초 후와 이후 1시간마다 새 릴리즈를 확인하고, 있으면 받아서 교체 후 다시 실행합니다.
+(메뉴: 버전 표시 · 업데이트 확인… · 자동 업데이트 켜기/끄기)
+
+- `api.github.com` 대신 `https://github.com/devhun/clampless/releases/latest` 의 302 리다이렉트에서
+  최신 태그를 읽으므로 GitHub API 호출 한도(비인증 시간당 60회)에 걸리지 않습니다.
+- zip은 릴리즈의 `checksums.txt`(SHA-256)로 검증한 뒤 교체합니다.
+- 업데이트로 재시작할 때는 잠자기 방지 상태를 유지합니다 (원격 접속이 끊기지 않도록).
+- 로컬 빌드(`0.0.0-dev`)는 자동 업데이트하지 않습니다.
+
 ## 권한
 
 `disablesleep` 은 root 권한이 필요합니다. 처음 토글할 때 관리자 비밀번호를 **한 번** 묻고,

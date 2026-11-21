@@ -105,9 +105,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaults = UserDefaults.standard
     private let kAutoOffOnBattery = "autoOffOnBattery"
     private let kRestoreOnQuit = "restoreOnQuit"
+    private let kAutoUpdate = "autoUpdate"
+
+    private let updater = Updater()
+    private var updateTimer: Timer?
+    private var updateBusy = false
+    private var availableTag: String?
+    /// 업데이트로 재시작하는 중이면 종료 시 잠자기 방지를 해제하지 않는다 (원격 접속 유지)
+    private var relaunchingForUpdate = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        defaults.register(defaults: [kAutoOffOnBattery: true, kRestoreOnQuit: true])
+        defaults.register(defaults: [kAutoOffOnBattery: true, kRestoreOnQuit: true, kAutoUpdate: true])
 
         if let button = statusItem.button {
             button.target = self
@@ -122,10 +130,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.refreshState()
         }
+
+        // 업데이트 확인: 시작 직후 한 번, 이후 1시간마다 (github.com 리다이렉트 방식이라 API 한도와 무관)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.checkForUpdate(manual: false) }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: Updater.checkInterval, repeats: true) { [weak self] _ in
+            self?.checkForUpdate(manual: false)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if isOn && defaults.bool(forKey: kRestoreOnQuit) {
+        if isOn && defaults.bool(forKey: kRestoreOnQuit) && !relaunchingForUpdate {
             _ = Power.setSleepDisabledWithoutPrompt(false)
         }
     }
@@ -241,6 +255,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        let version = NSMenuItem(title: "버전 \(updater.currentVersion)", action: nil, keyEquivalent: "")
+        version.isEnabled = false
+        menu.addItem(version)
+        if let tag = availableTag {
+            menu.addItem(item("\(tag) 업데이트 설치", #selector(installAvailableUpdate)))
+        }
+        let check = item(updateBusy ? "업데이트 확인 중…" : "업데이트 확인…", #selector(manualCheckForUpdate))
+        check.isEnabled = !updateBusy
+        menu.addItem(check)
+        let auto = item("자동 업데이트", #selector(toggleAutoUpdate))
+        auto.state = defaults.bool(forKey: kAutoUpdate) ? .on : .off
+        menu.addItem(auto)
+
+        menu.addItem(.separator())
         menu.addItem(item("Clampless 종료", #selector(quit), key: "q"))
     }
 
@@ -284,6 +312,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: 업데이트
+
+    @objc private func toggleAutoUpdate() {
+        defaults.set(!defaults.bool(forKey: kAutoUpdate), forKey: kAutoUpdate)
+    }
+
+    @objc private func manualCheckForUpdate() {
+        checkForUpdate(manual: true)
+    }
+
+    @objc private func installAvailableUpdate() {
+        guard let tag = availableTag else { return }
+        install(tag: tag, manual: true)
+    }
+
+    /// manual == false: 자동 업데이트가 켜져 있고 설치 가능하면 조용히 설치
+    /// manual == true : 결과를 알림창으로 보여 주고, 새 버전이면 설치 여부를 묻는다
+    private func checkForUpdate(manual: Bool) {
+        guard !updateBusy else { return }
+        if !manual && Updater.parseVersion(updater.currentVersion) == nil { return } // 개발 빌드
+        updateBusy = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try self.updater.checkForUpdate() }
+            DispatchQueue.main.async {
+                self.updateBusy = false
+                switch result {
+                case .failure(let error):
+                    if manual { self.alert("업데이트 확인 실패", error.localizedDescription) }
+                case .success(nil):
+                    self.availableTag = nil
+                    if manual { self.alert("최신 버전입니다", "현재 버전 \(self.updater.currentVersion)") }
+                case .success(let tag?):
+                    self.availableTag = tag
+                    if manual {
+                        if self.confirm("새 버전 \(tag) 이(가) 있습니다", "지금 설치하고 다시 시작할까요?\n(잠자기 방지 상태는 유지됩니다)") {
+                            self.install(tag: tag, manual: true)
+                        }
+                    } else if self.defaults.bool(forKey: self.kAutoUpdate), self.updater.installBlocker() == nil {
+                        self.install(tag: tag, manual: false)
+                    }
+                }
+            }
+        }
+    }
+
+    private func install(tag: String, manual: Bool) {
+        if let why = updater.installBlocker() {
+            if manual, confirm("자동으로 설치할 수 없습니다", "\(why)\n\n릴리즈 페이지를 열까요?") {
+                NSWorkspace.shared.open(updater.releasesPageURL)
+            }
+            return
+        }
+        guard !updateBusy else { return }
+        updateBusy = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try self.updater.downloadAndStage(tag: tag) }
+            DispatchQueue.main.async {
+                self.updateBusy = false
+                do {
+                    let newApp = try result.get()
+                    try self.updater.launchInstaller(newApp: newApp)
+                    self.relaunchingForUpdate = true
+                    NSApp.terminate(nil)
+                } catch {
+                    if manual { self.alert("업데이트 실패", error.localizedDescription) }
+                }
+            }
+        }
+    }
+
+    private func alert(_ title: String, _ text: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        NSApp.activate(ignoringOtherApps: true)
+        a.runModal()
+    }
+
+    private func confirm(_ title: String, _ text: String) -> Bool {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        a.addButton(withTitle: "확인")
+        a.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        return a.runModal() == .alertFirstButtonReturn
     }
 }
 
