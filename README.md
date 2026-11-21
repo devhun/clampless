@@ -35,6 +35,19 @@ Clampless는 모니터 없이 덮개를 닫아 두고 **SSH·화면 공유로 �
 
 ## 설치
 
+### 릴리즈에서 받기
+
+[Releases](https://github.com/devhun/clampless/releases/latest) 에서 `Clampless-vX.Y.Z-macos-universal.zip` 을 받아 압축을 풀고 `/Applications` 로 옮깁니다.
+
+Apple 공증(notarization)을 받지 않은 ad-hoc 서명 앱이라 처음 실행 시 Gatekeeper가 막습니다.
+시스템 설정 → 개인정보 보호 및 보안 → **"그래도 열기"** 를 누르거나, 터미널에서 격리 속성을 제거하세요.
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Clampless.app
+```
+
+### 직접 빌드
+
 Xcode 없이 Command Line Tools(`swiftc`, `lipo`, `codesign`)만 있으면 빌드됩니다.
 
 ```bash
@@ -42,8 +55,6 @@ Xcode 없이 Command Line Tools(`swiftc`, `lipo`, `codesign`)만 있으면 빌�
 cp -R build/Clampless.app /Applications/
 open /Applications/Clampless.app
 ```
-
-ad-hoc 서명이므로 다른 Mac에서 처음 열 때 Gatekeeper 경고가 뜨면 우클릭 → 열기로 실행하세요.
 
 ## 권한
 
@@ -78,4 +89,15 @@ Resources/AppIcon.icns      앱 아이콘
 Scripts/make_icon.swift     아이콘을 코드로 그리는 스크립트
 Scripts/make_icon.sh        PNG → .icns 변환
 build.sh                    Universal 빌드 + 번들 + ad-hoc 서명
+.github/workflows/release.yml  태그 푸시 시 빌드 → GitHub Release 업로드
+```
+
+## 릴리즈
+
+`v*` 태그를 푸시하면 GitHub Actions(macOS 러너)가 빌드해 Release에 zip과 `checksums.txt` 를 올립니다.
+앱 버전은 태그에서 가져옵니다 (`v1.2.0` → `1.2.0`).
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
 ```
