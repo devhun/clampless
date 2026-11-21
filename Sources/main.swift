@@ -101,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var busy = false
     private var powerSource: CFRunLoopSource?
     private var pollTimer: Timer?
+    private var wasOnBattery = false
+    private var graceDeadline: Date?
+    static let batteryGraceSeconds: TimeInterval = 5 * 60
 
     private let defaults = UserDefaults.standard
     private let kAutoOffOnBattery = "autoOffOnBattery"
@@ -124,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.delegate = self
 
+        wasOnBattery = Power.isOnBattery()
         refreshState()
         observePowerSource()
         // 터미널 등 외부에서 pmset을 바꾼 경우도 반영
@@ -179,7 +183,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func refreshState() {
         isOn = Power.isSleepDisabled()
+        evaluateBatteryGrace()
         updateIcon()
+    }
+
+    /// 배터리 상태에서 켜져 있으면 유예 시간을 주고, 그 안에 전원이 연결되지 않으면 끈다.
+    /// (집에서 배터리로 켜고 → 덮개 닫고 → 거치대에서 전원 연결하는 흐름을 위해)
+    private func evaluateBatteryGrace() {
+        let applies = isOn && defaults.bool(forKey: kAutoOffOnBattery) && Power.isOnBattery()
+        guard applies else { graceDeadline = nil; return }
+        guard let deadline = graceDeadline else {
+            graceDeadline = Date().addingTimeInterval(Self.batteryGraceSeconds)
+            return
+        }
+        if Date() >= deadline {
+            graceDeadline = nil
+            _ = Power.setSleepDisabledWithoutPrompt(false)
+            isOn = Power.isSleepDisabled()
+        }
+    }
+
+    /// 유예 중이면 남은 분(올림)
+    private var graceMinutesLeft: Int? {
+        guard let deadline = graceDeadline else { return nil }
+        return max(1, Int(ceil(deadline.timeIntervalSinceNow / 60)))
     }
 
     private func updateIcon() {
@@ -189,9 +216,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         image?.isTemplate = true
         button.image = image
         button.appearsDisabled = busy
-        button.toolTip = isOn
-            ? "Clampless: 켜짐 — 덮개를 닫아도 잠들지 않음 (클릭하여 끄기)"
-            : "Clampless: 꺼짐 — 일반 잠자기 (클릭하여 켜기)"
+        if let m = graceMinutesLeft {
+            button.toolTip = "Clampless: 켜짐 — 전원 연결 대기 중, \(m)분 안에 연결하지 않으면 꺼짐"
+        } else {
+            button.toolTip = isOn
+                ? "Clampless: 켜짐 — 덮개를 닫아도 잠들지 않음 (클릭하여 끄기)"
+                : "Clampless: 꺼짐 — 일반 잠자기 (클릭하여 켜기)"
+        }
     }
 
     // MARK: 배터리 감지
@@ -207,10 +238,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .defaultMode)
     }
 
+    /// 전원 어댑터 → 배터리로 바뀌는 순간에는 즉시 끈다 (들고 나갈 때).
+    /// 배터리 잔량 변화 등 그 밖의 알림은 유예 로직(refreshState)에 맡긴다.
     private func powerSourceChanged() {
-        guard defaults.bool(forKey: kAutoOffOnBattery), isOn, Power.isOnBattery() else { return }
-        // 배터리 상태에서 비밀번호 창을 띄우지 않도록 프롬프트 없는 경로만 사용
-        _ = Power.setSleepDisabledWithoutPrompt(false)
+        let onBattery = Power.isOnBattery()
+        let unplugged = onBattery && !wasOnBattery
+        wasOnBattery = onBattery
+        if unplugged && isOn && defaults.bool(forKey: kAutoOffOnBattery) {
+            graceDeadline = nil
+            // 비밀번호 창을 띄우지 않도록 프롬프트 없는 경로만 사용
+            _ = Power.setSleepDisabledWithoutPrompt(false)
+        }
         refreshState()
     }
 
@@ -225,7 +263,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         status.isEnabled = false
         menu.addItem(status)
 
-        if Power.isOnBattery() {
+        if let m = graceMinutesLeft {
+            let wait = NSMenuItem(title: "⏳ 전원 연결 대기 중 — \(m)분 안에 연결하지 않으면 꺼짐",
+                                  action: nil, keyEquivalent: "")
+            wait.isEnabled = false
+            menu.addItem(wait)
+        } else if Power.isOnBattery() {
             let warn = NSMenuItem(title: "⚠︎ 배터리 사용 중", action: nil, keyEquivalent: "")
             warn.isEnabled = false
             menu.addItem(warn)
@@ -235,7 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item(isOn ? "끄기" : "켜기", #selector(toggle)))
         menu.addItem(.separator())
 
-        let autoOff = item("배터리로 전환되면 자동으로 끄기", #selector(toggleAutoOff))
+        let autoOff = item("배터리 사용 시 자동으로 끄기 (배터리에서 켜면 5분 유예)", #selector(toggleAutoOff))
         autoOff.state = defaults.bool(forKey: kAutoOffOnBattery) ? .on : .off
         menu.addItem(autoOff)
 
@@ -280,6 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleAutoOff() {
         defaults.set(!defaults.bool(forKey: kAutoOffOnBattery), forKey: kAutoOffOnBattery)
+        refreshState()
     }
 
     @objc private func toggleRestoreOnQuit() {
